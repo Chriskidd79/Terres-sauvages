@@ -227,6 +227,25 @@
     </div>
   </div>
 
+  <div class="overlay" id="forgeOverlay" style="display:none;">
+    <div class="card">
+      <button class="closeBtn" id="closeForge">✕</button>
+      <h1>⚒️ Forge</h1>
+      <p>Améliore tes outils avec du bois et des minerais rares. Réussis le défi de rapidité pour valider l'amélioration.</p>
+      <div id="forgeList" style="text-align:left; margin-top:10px;"></div>
+    </div>
+  </div>
+
+  <div class="overlay" id="forgeGameOverlay" style="display:none;">
+    <div class="card">
+      <h1 id="forgeGameTitle">⚒️ Forge en cours…</h1>
+      <p id="forgeGameDesc"></p>
+      <div style="font-size:42px; font-weight:900; margin:14px 0;" id="forgeGameCount">0 / 0</div>
+      <div style="font-size:16px; opacity:0.85; margin-bottom:14px;" id="forgeGameTimer">15.0s</div>
+      <button class="bigbtn" id="forgeGameTapBtn" style="width:100%; padding:26px 0; font-size:20px;">MARTELER !</button>
+    </div>
+  </div>
+
   <div class="overlay" id="questOverlay" style="display:none;">
     <div class="card">
       <button class="closeBtn" id="closeQuest">✕</button>
@@ -584,8 +603,8 @@
   // villages
   const hutColliders = [];
   const npcs = [];
-  const MERCHANT_RADIUS = 4.2, WORKSHOP_RADIUS = 4.2, TRAINER_RADIUS = 4.2;
-  const merchants = [], workshops = [], trainers = [];
+  const MERCHANT_RADIUS = 4.2, WORKSHOP_RADIUS = 4.2, TRAINER_RADIUS = 4.2, FORGE_RADIUS = 4.2;
+  const merchants = [], workshops = [], trainers = [], forges = [];
 
   function buildVillager(colorSet){
     const model = buildHumanoid({
@@ -680,6 +699,35 @@
     tRing.rotation.x=-Math.PI/2; tRing.position.set(tPos.x,0.03,tPos.z);
     scene.add(tRing);
     trainers.push({ x:tPos.x, z:tPos.z });
+
+    // forge: upgrade tools with rare ores
+    const fPos = { x: x-5, z: z+2.5 };
+    const anvil = new THREE.Group();
+    const anvilBase = new THREE.Mesh(new THREE.BoxGeometry(0.9,0.5,0.5),
+      new THREE.MeshStandardMaterial({ color:0x2a2a2e, roughness:0.6, metalness:0.5 }));
+    anvilBase.position.y = 0.35;
+    const anvilTop = new THREE.Mesh(new THREE.BoxGeometry(1.1,0.22,0.6),
+      new THREE.MeshStandardMaterial({ color:0x3a3a40, roughness:0.5, metalness:0.6 }));
+    anvilTop.position.y = 0.68;
+    anvil.add(anvilBase, anvilTop);
+    anvil.position.set(fPos.x, 0, fPos.z);
+    scene.add(anvil);
+    const fireGlow = new THREE.PointLight(0xff8a33, 1.2, 4);
+    fireGlow.position.set(fPos.x+0.9, 0.5, fPos.z+0.3);
+    scene.add(fireGlow);
+    const fModel = buildVillager({ pants:0x2a2020, torso:0x6a2a2a });
+    const fGroup = new THREE.Group();
+    fGroup.add(fModel.group);
+    fGroup.position.set(fPos.x+0.9, 0, fPos.z+0.3);
+    const fSprite = makeEmojiSprite('⚒️',1.1);
+    fSprite.position.y = 2.1;
+    fGroup.add(fSprite);
+    scene.add(fGroup);
+    const fRing = new THREE.Mesh(new THREE.RingGeometry(FORGE_RADIUS-0.1,FORGE_RADIUS,32),
+      new THREE.MeshBasicMaterial({ color:0xff8a33, transparent:true, opacity:0.25, side:THREE.DoubleSide }));
+    fRing.rotation.x=-Math.PI/2; fRing.position.set(fPos.x,0.03,fPos.z);
+    scene.add(fRing);
+    forges.push({ x:fPos.x, z:fPos.z });
 
     for(let i=0;i<2;i++){
       const vModel = buildVillager({ pants:0x3a3a4a, torso: i===0?0x6a3a4a:0x3a5a6a });
@@ -789,6 +837,7 @@
     fer:{icon:'🔩', name:'Fer', sell:3}, or:{icon:'🥇', name:'Or', sell:8},
     charbon:{icon:'⚫', name:'Charbon', sell:2}, argile:{icon:'🧱', name:'Argile', sell:1},
     cristal:{icon:'💎', name:'Cristal', sell:15},
+    diamant:{icon:'💠', name:'Diamant', sell:40}, obsidienne:{icon:'🟣', name:'Obsidienne', sell:120},
     pomme:{icon:'🍎', name:'Pomme', sell:2}, banane:{icon:'🍌', name:'Banane', sell:2}, poire:{icon:'🍐', name:'Poire', sell:2},
     carotte:{icon:'🥕', name:'Carotte', sell:2}, tomate:{icon:'🍅', name:'Tomate', sell:2},
     viande:{icon:'🥩', name:'Viande', sell:4},
@@ -1087,6 +1136,99 @@
   }
   $('closeWorkshop').addEventListener('click', ()=>{ $('workshopOverlay').style.display='none'; });
 
+  // ---- forge: tool tiers, upgrade costs, click-speed minigame ----
+  let toolTier = { hache:'base', pioche:'base', epee:'base' };
+  const TIER_ORDER = ['base','or','diamant','obsidienne'];
+  const TIER_LABEL = { base:'De base', or:'En or', diamant:'En diamant', obsidienne:'En obsidienne' };
+  const FORGE_UPGRADE_COST = {
+    or:         { bois:20, matKey:'or',         matQty:15 },
+    diamant:    { bois:40, matKey:'diamant',    matQty:30 },
+    obsidienne: { bois:70, matKey:'obsidienne', matQty:50 }
+  };
+  const FORGE_CLICKS_NEEDED = { or:15, diamant:30, obsidienne:50 };
+  const FORGE_TIME_LIMIT = 15;
+  const TOOL_ICON = { hache:'🪓', pioche:'⛏️', epee:'🗡️' };
+  const TOOL_LABEL = { hache:'Hache', pioche:'Pioche', epee:'Épée' };
+
+  function renderForge(){
+    const list = $('forgeList');
+    list.innerHTML = '';
+    ['hache','pioche','epee'].forEach(toolKey=>{
+      const tier = toolTier[toolKey];
+      const nextTier = TIER_ORDER[TIER_ORDER.indexOf(tier)+1];
+      const card = document.createElement('div');
+      card.className = 'recipeCard';
+      if(!owned[toolKey]){
+        card.innerHTML = `<div style="font-weight:800;">${TOOL_ICON[toolKey]} ${TOOL_LABEL[toolKey]}</div>
+          <div style="font-size:11px; opacity:0.75;">Fabrique d'abord cet outil à l'atelier.</div>`;
+        list.appendChild(card);
+        return;
+      }
+      if(!nextTier){
+        card.innerHTML = `<div style="font-weight:800;">${TOOL_ICON[toolKey]} ${TOOL_LABEL[toolKey]} — ${TIER_LABEL[tier]}</div>
+          <div style="font-size:11px; opacity:0.75;">Niveau maximum atteint !</div>`;
+        list.appendChild(card);
+        return;
+      }
+      const cost = FORGE_UPGRADE_COST[nextTier];
+      const rd = RES_DEFS[cost.matKey];
+      card.innerHTML = `<div style="font-weight:800;">${TOOL_ICON[toolKey]} ${TOOL_LABEL[toolKey]} — ${TIER_LABEL[tier]} → ${TIER_LABEL[nextTier]}</div>
+        <div style="font-size:11px; opacity:0.75;">Coût : 🪵${cost.bois} (as ${inv.bois||0}) + ${rd.icon}${cost.matQty} ${rd.name} (as ${inv[cost.matKey]||0})</div>`;
+      const btn = document.createElement('button');
+      const affordable = (inv.bois||0) >= cost.bois && (inv[cost.matKey]||0) >= cost.matQty;
+      btn.textContent = affordable ? 'Améliorer' : 'Ressources insuffisantes';
+      btn.disabled = !affordable;
+      btn.addEventListener('click', ()=> startForgeMinigame(toolKey, nextTier));
+      card.appendChild(btn);
+      list.appendChild(card);
+    });
+  }
+  $('closeForge').addEventListener('click', ()=>{ $('forgeOverlay').style.display='none'; });
+
+  let forgeGame = null;
+  function startForgeMinigame(toolKey, nextTier){
+    const cost = FORGE_UPGRADE_COST[nextTier];
+    const needed = FORGE_CLICKS_NEEDED[nextTier];
+    $('forgeOverlay').style.display = 'none';
+    $('forgeGameOverlay').style.display = 'flex';
+    $('forgeGameTitle').textContent = '⚒️ Forger : '+TOOL_LABEL[toolKey]+' en '+TIER_LABEL[nextTier].toLowerCase();
+    $('forgeGameDesc').textContent = 'Martèle le plus vite possible avant la fin du temps imparti !';
+    forgeGame = { toolKey, nextTier, cost, needed, clicks:0, timeLeft:FORGE_TIME_LIMIT, done:false };
+    $('forgeGameCount').textContent = '0 / '+needed;
+    $('forgeGameTimer').textContent = FORGE_TIME_LIMIT.toFixed(1)+'s';
+  }
+  $('forgeGameTapBtn').addEventListener('click', ()=>{
+    if(!forgeGame || forgeGame.done) return;
+    forgeGame.clicks++;
+    $('forgeGameCount').textContent = forgeGame.clicks+' / '+forgeGame.needed;
+    if(forgeGame.clicks >= forgeGame.needed) finishForgeMinigame(true);
+  });
+  function finishForgeMinigame(success){
+    if(!forgeGame || forgeGame.done) return;
+    forgeGame.done = true;
+    const { toolKey, nextTier, cost } = forgeGame;
+    if(success){
+      inv.bois -= cost.bois;
+      inv[cost.matKey] -= cost.matQty;
+      toolTier[toolKey] = nextTier;
+      sndCraft();
+      showToast('⚒️ '+TOOL_LABEL[toolKey]+' forgée en '+TIER_LABEL[nextTier].toLowerCase()+' !', 1600);
+    } else {
+      showToast('⚒️ Trop lent... réessaie !', 1400);
+    }
+    setTimeout(()=>{
+      $('forgeGameOverlay').style.display = 'none';
+      forgeGame = null;
+      updateHUD();
+    }, 900);
+  }
+  function updateForgeGame(dt){
+    if(!forgeGame || forgeGame.done) return;
+    forgeGame.timeLeft -= dt;
+    $('forgeGameTimer').textContent = Math.max(0,forgeGame.timeLeft).toFixed(1)+'s';
+    if(forgeGame.timeLeft <= 0) finishForgeMinigame(false);
+  }
+
   $('bagBtn').addEventListener('click', ()=>{ renderBag(); $('bagOverlay').style.display='flex'; });
   $('closeBag').addEventListener('click', ()=>{ $('bagOverlay').style.display='none'; });
 
@@ -1157,7 +1299,8 @@
   }
 
   function makeRockMesh(oreType){
-    const colors = { fer:0xb56a4a, or:0xe8c840, charbon:0x2a2a2a, cristal:0xb060ff, pierre:0x8a8a8a };
+    const colors = { fer:0xb56a4a, or:0xe8c840, charbon:0x2a2a2a, cristal:0xb060ff,
+      diamant:0x9be8ff, obsidienne:0x231b2e, pierre:0x8a8a8a };
     const mesh = new THREE.Mesh(
       new THREE.DodecahedronGeometry(0.55,0),
       new THREE.MeshStandardMaterial({ color: colors[oreType]||colors.pierre, roughness:0.8, flatShading:true })
@@ -1169,10 +1312,12 @@
   function spawnRock(x,z){
     const roll = Math.random();
     let oreType = null;
-    if(roll<0.03) oreType='cristal';
-    else if(roll<0.07) oreType='or';
-    else if(roll<0.17) oreType='fer';
-    else if(roll<0.29) oreType='charbon';
+    if(roll<0.003) oreType='obsidienne';
+    else if(roll<0.015) oreType='diamant';
+    else if(roll<0.05) oreType='or';
+    else if(roll<0.09) oreType='cristal';
+    else if(roll<0.20) oreType='fer';
+    else if(roll<0.34) oreType='charbon';
     const mesh = makeRockMesh(oreType);
     mesh.position.x = x; mesh.position.z = z;
     mesh.scale.setScalar(0.8+Math.random()*0.5);
@@ -1296,9 +1441,9 @@
     const rng = mulberry32(regionSeed(rx,rz));
     const roll = rng();
     let biome;
-    if(roll < 0.10) biome = 'village';
-    else if(roll < 0.48) biome = 'forest';
-    else if(roll < 0.70) biome = 'mountain';
+    if(roll < 0.12) biome = 'village';
+    else if(roll < 0.56) biome = 'forest';
+    else if(roll < 0.84) biome = 'mountain';
     else biome = 'plains';
 
     let villageChunk = null;
@@ -1485,13 +1630,12 @@
   const ATTACK_RANGE = 4.3;
   const PICKUP_RANGE = 1.3;
 
-  const TOOL_DAMAGE = { bare:6, hache:16, pioche:16, epee:19 };
-  const TOOL_MULT = {
-    bare:   { tree:0.6, rock:0.4, animal:0.7, monster:0.5 },
-    hache:  { tree:1.7, rock:0.5, animal:0.9, monster:0.8 },
-    pioche: { tree:0.5, rock:1.7, animal:0.7, monster:0.7 },
-    epee:   { tree:0.4, rock:0.4, animal:1.5, monster:1.7 }
+  const HITS_TO_BREAK = {
+    hache:  { base:8,  or:6, diamant:4, obsidienne:2 },
+    pioche: { base:8,  or:6, diamant:4, obsidienne:2 },
+    epee:   { base:10, or:7, diamant:5, obsidienne:3 }
   };
+  const FALLBACK_HITS = 16; // bare hands, or a tool used outside its specialty
 
   function categoryOf(target){
     if(target.kind==='tree') return 'tree';
@@ -1596,7 +1740,15 @@
     facingAngle = Math.atan2(dx,dz);
     player.rotation.y = facingAngle;
 
-    const dmg = (TOOL_DAMAGE[toolName] + (toolBoost[toolName]||0) + forceBoost) * TOOL_MULT[toolName][categoryOf(best)];
+    const category = categoryOf(best);
+    const tier = toolName==='bare' ? 'base' : (toolTier[toolName]||'base');
+    let hits;
+    if(toolName==='hache') hits = category==='tree' ? HITS_TO_BREAK.hache[tier] : FALLBACK_HITS;
+    else if(toolName==='pioche') hits = category==='rock' ? HITS_TO_BREAK.pioche[tier] : FALLBACK_HITS;
+    else if(toolName==='epee') hits = (category==='animal'||category==='monster') ? HITS_TO_BREAK.epee[tier] : FALLBACK_HITS;
+    else hits = FALLBACK_HITS;
+    const extra = (toolBoost[toolName]||0) + forceBoost;
+    const dmg = (best.maxHp / hits) + extra;
     best.hp -= dmg;
 
     if(best.kind==='tree'){ sndChop(); if(best.hp<=0) resolveTreeDeath(best); }
@@ -1681,6 +1833,9 @@
     for(const t of trainers){
       if(Math.hypot(player.position.x-t.x, player.position.z-t.z) < TRAINER_RADIUS) return {type:'trainer'};
     }
+    for(const f of forges){
+      if(Math.hypot(player.position.x-f.x, player.position.z-f.z) < FORGE_RADIUS) return {type:'forge'};
+    }
     return null;
   }
   const interactBtn = $('interactBtn');
@@ -1689,6 +1844,7 @@
     if(!near) return;
     if(near.type==='merchant'){ renderMerchant(); $('merchantOverlay').style.display='flex'; }
     else if(near.type==='trainer'){ renderBoosts(); $('trainerOverlay').style.display='flex'; }
+    else if(near.type==='forge'){ renderForge(); $('forgeOverlay').style.display='flex'; }
     else { renderWorkshop(); $('workshopOverlay').style.display='flex'; }
   });
   function updateInteractBtn(){
@@ -1696,7 +1852,8 @@
     if(near){
       interactBtn.style.display = 'block';
       interactBtn.textContent = near.type==='merchant' ? '🤝 Voir le marchand'
-        : near.type==='trainer' ? '💪 Voir l\'entraîneur' : '🔨 Voir l\'atelier';
+        : near.type==='trainer' ? '💪 Voir l\'entraîneur'
+        : near.type==='forge' ? '⚒️ Voir la forge' : '🔨 Voir l\'atelier';
     } else {
       interactBtn.style.display = 'none';
     }
@@ -1730,6 +1887,9 @@
     daySky.material.opacity = dayFactor;
     nightSky.material.opacity = 1;
     stars.material.opacity = (1-dayFactor)*0.9;
+    daySky.position.set(camera.position.x, 0, camera.position.z);
+    nightSky.position.set(camera.position.x, 0, camera.position.z);
+    stars.position.set(camera.position.x, 0, camera.position.z);
     hemi.intensity = 0.35 + dayFactor*0.6;
     sun.intensity = dayFactor*1.0;
     moon.intensity = (1-dayFactor)*0.35;
@@ -2111,7 +2271,7 @@
     const data = {
       ts: Date.now(), hp, maxHp, money, food, maxFood,
       toolBoost: {...toolBoost}, forceBoost, boostLevels: {...boostLevels}, SPEED,
-      inv: {...inv}, owned: {...owned}, equippedTool,
+      inv: {...inv}, owned: {...owned}, equippedTool, toolTier: {...toolTier},
       px: player.position.x, pz: player.position.z, worldTime
     };
     saveCache['slot'+i] = data;
@@ -2141,6 +2301,7 @@
     if(!data) return;
     hp = data.hp; maxHp = data.maxHp; money = data.money;
     if(data.toolBoost) Object.assign(toolBoost, data.toolBoost);
+    if(data.toolTier) Object.assign(toolTier, data.toolTier);
     if(data.boostLevels) Object.assign(boostLevels, data.boostLevels);
     forceBoost = data.forceBoost||0;
     SPEED = data.SPEED||7.8;
@@ -2363,6 +2524,7 @@
     const now = performance.now();
 
     updateDayNight(dt);
+    updateForgeGame(dt);
 
     if(gameState === 'playing'){
       movePlayer(dt);
