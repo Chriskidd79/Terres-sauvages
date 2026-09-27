@@ -2097,6 +2097,9 @@
     input.value = '';
     if(!ws || ws.readyState !== 1){ showToast('Chat indisponible hors ligne', 1000); return; }
     ws.send(JSON.stringify({ type:'chat', name: myName, text }));
+    chatMessages.push({ name: myName, text, isMe: true });
+    if(chatMessages.length > 50) chatMessages.shift();
+    if(chatOpen){ renderChatMessages(); }
   }
   $('chatSendBtn').addEventListener('click', sendChatMessage);
   $('chatInput').addEventListener('keydown', e=>{
