@@ -62,7 +62,7 @@
   .toolBtn .itemCount{ position:absolute; bottom:-4px; right:-4px; background:var(--danger); color:#fff;
     font-size:10px; font-weight:800; border-radius:8px; padding:1px 4px; line-height:1.3; }
   .toolBtn.active{ background:var(--accent); color:#08220f; border-color:var(--accent); }
-  #interactBtn{ background:linear-gradient(180deg, var(--gold), #d9a13f); border:none; color:#2a1b00;
+  #interactBtn, #tradeBtn{ background:linear-gradient(180deg, var(--gold), #d9a13f); border:none; color:#2a1b00;
     font-weight:800; font-size:13px; padding:8px 14px; border-radius:12px; display:none; }
 
   #dpad{ position:absolute; bottom:96px; left:14px; width:118px; height:118px; display:grid;
@@ -151,6 +151,7 @@
 
   <div id="bottomBar">
     <button id="interactBtn"></button>
+    <button id="tradeBtn"></button>
     <div id="chatPanel" style="display:none;">
       <div id="chatMessages"></div>
       <div id="chatInputRow">
@@ -243,6 +244,32 @@
       <div style="font-size:42px; font-weight:900; margin:14px 0;" id="forgeGameCount">0 / 0</div>
       <div style="font-size:16px; opacity:0.85; margin-bottom:14px;" id="forgeGameTimer">15.0s</div>
       <button class="bigbtn" id="forgeGameTapBtn" style="width:100%; padding:26px 0; font-size:20px;">MARTELER !</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="tradeRequestOverlay" style="display:none;">
+    <div class="card">
+      <h1>🤝 Échange</h1>
+      <p id="tradeRequestText"></p>
+      <button class="bigbtn" id="tradeAcceptBtn" style="margin-top:12px;">Accepter</button>
+      <button id="tradeDeclineBtn" style="margin-top:8px; background:rgba(255,255,255,0.12); border:none; color:var(--text);
+        font-weight:800; padding:8px 14px; border-radius:8px; cursor:pointer; font-size:12px;">Refuser</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="tradeOverlay" style="display:none;">
+    <div class="card">
+      <button class="closeBtn" id="tradeCancelBtn">✕</button>
+      <h1>🤝 Échange avec <span id="tradePartnerName"></span></h1>
+      <p style="margin-top:10px;"><b>Ton offre</b></p>
+      <input id="tradeMyAmount" type="number" min="0" step="1" placeholder="0"
+        style="width:100%; border:none; border-radius:8px; padding:8px 10px; font-size:14px;
+        background:rgba(255,255,255,0.12); color:var(--text);" />
+      <button class="bigbtn" id="tradeProposeBtn" style="margin-top:8px;">Proposer 💰</button>
+      <p style="margin-top:14px;"><b>Offre reçue</b></p>
+      <div id="tradeTheirAmount" style="font-size:20px; font-weight:800;">0 💰</div>
+      <p id="tradeStatus" style="margin-top:12px; opacity:0.8; font-size:12px;"></p>
+      <button class="bigbtn" id="tradeConfirmBtn" style="margin-top:10px;">Confirmer l'échange</button>
     </div>
   </div>
 
@@ -2190,8 +2217,116 @@
         if(chatMessages.length > 50) chatMessages.shift();
         if(chatOpen){ renderChatMessages(); }
         else if(msg.id !== myPeerId){ chatUnread++; $('chatBadge').style.display='flex'; $('chatBadge').textContent = chatUnread; }
+      } else if(msg.type === 'trade_request'){
+        if(tradeState || incomingTrade) return; // déjà occupé
+        incomingTrade = { fromId: msg.id, fromName: msg.name || 'Aventurier' };
+        $('tradeRequestText').textContent = (msg.name||'Un joueur')+' te propose un échange. Accepter ?';
+        $('tradeRequestOverlay').style.display = 'flex';
+      } else if(msg.type === 'trade_response'){
+        if(!pendingTradeTo || msg.id !== pendingTradeTo) return;
+        if(msg.accept){ openTradeWindow(msg.id, pendingTradeToName); }
+        else { showToast((pendingTradeToName||'Le joueur')+' a refusé l\'échange', 1400); }
+        pendingTradeTo = null; pendingTradeToName = null;
+      } else if(msg.type === 'trade_offer'){
+        if(!tradeState || msg.id !== tradeState.partnerId) return;
+        tradeState.theirOffer = Math.max(0, Math.floor(Number(msg.amount)||0));
+        tradeState.theirConfirmed = false; tradeState.myConfirmed = false;
+        $('tradeTheirAmount').textContent = tradeState.theirOffer+' 💰';
+        $('tradeStatus').textContent = 'L\'offre a changé, confirme à nouveau.';
+      } else if(msg.type === 'trade_confirm'){
+        if(!tradeState || msg.id !== tradeState.partnerId) return;
+        tradeState.theirConfirmed = true;
+        maybeFinishTrade();
+      } else if(msg.type === 'trade_cancel'){
+        if(tradeState && msg.id === tradeState.partnerId){ closeTradeWindow('Échange annulé par l\'autre joueur.'); }
+        if(incomingTrade && msg.id === incomingTrade.fromId){ incomingTrade = null; $('tradeRequestOverlay').style.display = 'none'; }
       }
     };
+  }
+
+  // ============================================================
+  // ÉCHANGE ENTRE JOUEURS (argent uniquement)
+  // ============================================================
+  const TRADE_RADIUS = 3.2;
+  let tradeState = null;       // {partnerId, partnerName, myOffer, theirOffer, myConfirmed, theirConfirmed}
+  let incomingTrade = null;    // {fromId, fromName}
+  let pendingTradeTo = null, pendingTradeToName = null;
+
+  function nearestTradeTarget(){
+    let best = null, bestD = TRADE_RADIUS;
+    for(const [id, rp] of remotePlayers){
+      const d = Math.hypot(player.position.x-rp.group.position.x, player.position.z-rp.group.position.z);
+      if(d < bestD){ bestD = d; best = { id, name: rp.lastName || 'Aventurier' }; }
+    }
+    return best;
+  }
+  function updateTradeBtn(){
+    if(!ws || ws.readyState !== 1 || tradeState || incomingTrade){ $('tradeBtn').style.display = 'none'; return; }
+    const near = nearestTradeTarget();
+    if(near){ $('tradeBtn').style.display = 'block'; $('tradeBtn').textContent = '🤝 Échanger avec '+near.name; $('tradeBtn').dataset.targetId = near.id; $('tradeBtn').dataset.targetName = near.name; }
+    else { $('tradeBtn').style.display = 'none'; }
+  }
+  $('tradeBtn').addEventListener('click', ()=>{
+    const id = $('tradeBtn').dataset.targetId, name = $('tradeBtn').dataset.targetName;
+    if(!id || !ws || ws.readyState !== 1) return;
+    pendingTradeTo = id; pendingTradeToName = name;
+    ws.send(JSON.stringify({ type:'trade_request', to:id, name:myName }));
+    showToast('Demande envoyée à '+name, 1200);
+  });
+  $('tradeAcceptBtn').addEventListener('click', ()=>{
+    if(!incomingTrade) return;
+    ws.send(JSON.stringify({ type:'trade_response', to:incomingTrade.fromId, accept:true }));
+    openTradeWindow(incomingTrade.fromId, incomingTrade.fromName);
+    incomingTrade = null;
+    $('tradeRequestOverlay').style.display = 'none';
+  });
+  $('tradeDeclineBtn').addEventListener('click', ()=>{
+    if(!incomingTrade) return;
+    ws.send(JSON.stringify({ type:'trade_response', to:incomingTrade.fromId, accept:false }));
+    incomingTrade = null;
+    $('tradeRequestOverlay').style.display = 'none';
+  });
+  function openTradeWindow(partnerId, partnerName){
+    tradeState = { partnerId, partnerName, myOffer:0, theirOffer:0, myConfirmed:false, theirConfirmed:false };
+    $('tradePartnerName').textContent = partnerName;
+    $('tradeMyAmount').value = '';
+    $('tradeTheirAmount').textContent = '0 💰';
+    $('tradeStatus').textContent = '';
+    $('tradeOverlay').style.display = 'flex';
+  }
+  function closeTradeWindow(toastMsg){
+    tradeState = null;
+    $('tradeOverlay').style.display = 'none';
+    if(toastMsg) showToast(toastMsg, 1400);
+  }
+  $('tradeProposeBtn').addEventListener('click', ()=>{
+    if(!tradeState) return;
+    let amount = Math.max(0, Math.floor(Number($('tradeMyAmount').value)||0));
+    if(amount > money){ showToast('Tu n\'as pas assez de 💰', 1200); return; }
+    tradeState.myOffer = amount;
+    tradeState.myConfirmed = false; tradeState.theirConfirmed = false;
+    ws.send(JSON.stringify({ type:'trade_offer', to:tradeState.partnerId, amount }));
+    $('tradeStatus').textContent = 'Offre envoyée : '+amount+' 💰';
+  });
+  $('tradeConfirmBtn').addEventListener('click', ()=>{
+    if(!tradeState) return;
+    if(tradeState.myOffer > money){ showToast('Tu n\'as pas assez de 💰', 1200); return; }
+    tradeState.myConfirmed = true;
+    ws.send(JSON.stringify({ type:'trade_confirm', to:tradeState.partnerId }));
+    $('tradeStatus').textContent = 'En attente de la confirmation de '+tradeState.partnerName+'…';
+    maybeFinishTrade();
+  });
+  $('tradeCancelBtn').addEventListener('click', ()=>{
+    if(tradeState){ ws.send(JSON.stringify({ type:'trade_cancel', to:tradeState.partnerId })); }
+    closeTradeWindow();
+  });
+  function maybeFinishTrade(){
+    if(!tradeState || !tradeState.myConfirmed || !tradeState.theirConfirmed) return;
+    if(tradeState.myOffer > money){ closeTradeWindow('Échange annulé : fonds insuffisants.'); return; }
+    money = money - tradeState.myOffer + tradeState.theirOffer;
+    updateHUD();
+    sndCraft();
+    closeTradeWindow('Échange conclu : -'+tradeState.myOffer+'💰 / +'+tradeState.theirOffer+'💰');
   }
 
   let lastPresenceSend = 0;
@@ -2545,6 +2680,7 @@
       updateMonsters(dt, now);
       updateNodesAndPickups(now);
       updateInteractBtn();
+      updateTradeBtn();
       updateStarvation(dt);
       sendPresence(now);
     }

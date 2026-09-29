@@ -44,9 +44,16 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
-    if (msg.type !== 'presence' && msg.type !== 'chat') return;
+    const allowed = ['presence','chat','trade_request','trade_response','trade_offer','trade_confirm','trade_cancel'];
+    if (!allowed.includes(msg.type)) return;
     msg.id = ws.id;
     const payload = JSON.stringify(msg);
+    if (msg.to) {
+      for (const peer of room) {
+        if (peer.id === msg.to && peer.readyState === peer.OPEN) { peer.send(payload); return; }
+      }
+      return;
+    }
     for (const peer of room) {
       if (peer !== ws && peer.readyState === peer.OPEN) peer.send(payload);
     }
