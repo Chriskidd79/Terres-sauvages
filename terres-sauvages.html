@@ -1435,27 +1435,69 @@
   function chunkSeed(cx,cz){ return ((cx*374761393) ^ (cz*668265263) ^ 0x9E3779B9) | 0; }
   function regionSeed(rx,rz){ return ((rx*915488749) ^ (rz*472882049) ^ 0x51ED270B) | 0; }
 
-  function getRegionInfo(rx,rz){
-    const key = rx+'_'+rz;
-    if(regionInfoCache.has(key)) return regionInfoCache.get(key);
-    const rng = mulberry32(regionSeed(rx,rz));
+  // ---- circular biome zones (like the spawn map) ----
+  // The plane is cut into ZCELL x ZCELL cells; each cell holds at most one
+  // round zone (forest / mountain / village) that always fits inside its
+  // own cell, so zones never overlap and the rest is open plains.
+  const ZCELL = 50;
+  const zoneCache = new Map();
+  function getZone(gx,gz){
+    const key = gx+'_'+gz;
+    if(zoneCache.has(key)) return zoneCache.get(key);
+    const rng = mulberry32(regionSeed(gx,gz));
     const roll = rng();
-    let biome;
-    if(roll < 0.12) biome = 'village';
-    else if(roll < 0.56) biome = 'forest';
-    else if(roll < 0.84) biome = 'mountain';
-    else biome = 'plains';
-
-    let villageChunk = null;
-    if(biome==='village'){
-      villageChunk = {
-        cx: rx*REGION_CHUNKS + Math.floor(rng()*REGION_CHUNKS),
-        cz: rz*REGION_CHUNKS + Math.floor(rng()*REGION_CHUNKS)
-      };
+    let zone = null;
+    if(roll < 0.96){
+      const type = roll < 0.08 ? 'village' : roll < 0.52 ? 'forest' : 'mountain';
+      const r = type==='village' ? 12 : 10 + rng()*7;
+      const x = gx*ZCELL + 17 + rng()*16, z = gz*ZCELL + 17 + rng()*16;
+      if(Math.hypot(x,z) > CORE_RADIUS + r) zone = { type, x, z, r, built:false };
     }
-    const info = { biome, villageChunk, villageBuilt:false };
-    regionInfoCache.set(key, info);
-    return info;
+    zoneCache.set(key, zone);
+    return zone;
+  }
+  function inAnyProcZone(x,z){
+    const zn = getZone(Math.floor(x/ZCELL), Math.floor(z/ZCELL));
+    return !!zn && Math.hypot(x-zn.x, z-zn.z) < zn.r+3;
+  }
+  function randomInDisk(zn, rng){
+    const a = rng()*Math.PI*2, d = Math.sqrt(rng())*zn.r*0.92;
+    return { x: zn.x+Math.cos(a)*d, z: zn.z+Math.sin(a)*d };
+  }
+  function buildZone(zn){
+    zn.built = true;
+    const rng = mulberry32(regionSeed(Math.round(zn.x), Math.round(zn.z)));
+    const color = zn.type==='forest' ? 0x3f6b34 : zn.type==='mountain' ? 0x8a8478 : 0x9c7f4f;
+    biomePatch(zn.x, zn.z, zn.r, color, zn.type==='village' ? 0.016 : 0.015);
+    const area = Math.PI*zn.r*zn.r;
+    if(zn.type==='forest'){
+      const n = Math.round(area*0.009);
+      for(let i=0;i<n;i++){ const p = randomInDisk(zn,rng); spawnTree(p.x,p.z); }
+    } else if(zn.type==='mountain'){
+      const peaks = [];
+      const pn = 2+Math.floor(zn.r/9);
+      for(let i=0;i<pn;i++){
+        const p = randomInDisk({x:zn.x,z:zn.z,r:zn.r*0.8}, rng);
+        const h = 5+rng()*4, baseR = 2.4+rng()*1.4;
+        const peak = new THREE.Mesh(new THREE.ConeGeometry(baseR,h,6),
+          new THREE.MeshStandardMaterial({ color:0x746a5e, roughness:1 }));
+        peak.position.set(p.x, h/2, p.z);
+        peak.rotation.y = rng()*Math.PI;
+        scene.add(peak);
+        const c = { x:p.x, z:p.z, r: baseR*1.08 };
+        mountainColliders.push(c);
+        peaks.push(c);
+      }
+      const rn = Math.round(area*0.007);
+      for(let i=0;i<rn;i++){
+        let p, tries=0, ok=false;
+        do{ p = randomInDisk(zn,rng); ok = peaks.every(c=> Math.hypot(p.x-c.x,p.z-c.z) > c.r+1.6); tries++; } while(!ok && tries<20);
+        if(ok) spawnRock(p.x,p.z);
+      }
+    } else {
+      const name = chunkNames[chunkNameIdx % chunkNames.length]; chunkNameIdx++;
+      buildVillage(zn.x, zn.z, name);
+    }
   }
 
   function loadChunk(cx, cz){
@@ -1465,71 +1507,31 @@
 
     const centerX = cx*CHUNK_SIZE + CHUNK_SIZE/2;
     const centerZ = cz*CHUNK_SIZE + CHUNK_SIZE/2;
-    const isCore = Math.hypot(centerX,centerZ) < CORE_RADIUS; // already covered by the hand-crafted world
-
-    const rx = Math.floor(cx/REGION_CHUNKS), rz = Math.floor(cz/REGION_CHUNKS);
-    const region = getRegionInfo(rx,rz);
-    const biome = isCore ? 'plains' : region.biome;
+    const isCore = Math.hypot(centerX,centerZ) < CORE_RADIUS;
     const rng = mulberry32(chunkSeed(cx,cz));
 
-    // always lay ground here, even inside the core, so there is never a gap
-    // between the hand-crafted circular ground and the procedural chunks
-    const tileColor = isCore ? 0x4d7a3f
-      : biome==='forest' ? 0x3f6b34 : biome==='mountain' ? 0x8a8478 : biome==='village' ? 0x9c7f4f : 0x4d7a3f;
+    // plain green ground everywhere; biome zones are drawn as round patches on top
     const tile = new THREE.Mesh(new THREE.PlaneGeometry(CHUNK_SIZE+0.6, CHUNK_SIZE+0.6),
-      new THREE.MeshStandardMaterial({ color: tileColor, roughness:1 }));
+      new THREE.MeshStandardMaterial({ color: 0x4d7a3f, roughness:1 }));
     tile.rotation.x = -Math.PI/2;
-    tile.position.set(centerX, biome==='village'?0.016:0.012, centerZ);
+    tile.position.set(centerX, 0.012, centerZ);
     scene.add(tile);
 
-    if(isCore){
-      // ground only here — resources already hand-placed in the core world
-    } else if(biome==='forest'){
-      const n = 9+Math.floor(rng()*6);
+    if(!isCore){
+      const an = 3+Math.floor(rng()*4);
+      for(let i=0;i<an;i++){
+        spawnAnimal(rng()<0.6?'lapin':'sanglier',
+          { x:centerX+(rng()-0.5)*CHUNK_SIZE*0.9, z:centerZ+(rng()-0.5)*CHUNK_SIZE*0.9 });
+      }
+      const n = 1+Math.floor(rng()*3);
       for(let i=0;i<n;i++){
-        spawnTree(centerX+(rng()-0.5)*CHUNK_SIZE*0.85, centerZ+(rng()-0.5)*CHUNK_SIZE*0.85);
+        const x = centerX+(rng()-0.5)*CHUNK_SIZE*0.8, z = centerZ+(rng()-0.5)*CHUNK_SIZE*0.8;
+        if(!inAnyProcZone(x,z)) spawnPickup('caillou', x, z);
       }
-    } else if(biome==='mountain'){
-      const localPeaks = [];
-      const pn = 1+Math.floor(rng()*2);
-      for(let i=0;i<pn;i++){
-        const x = centerX+(rng()-0.5)*CHUNK_SIZE*0.65, z = centerZ+(rng()-0.5)*CHUNK_SIZE*0.65;
-        const h = 5+rng()*4, baseR = 2.4+rng()*1.4;
-        const peak = new THREE.Mesh(new THREE.ConeGeometry(baseR,h,6),
-          new THREE.MeshStandardMaterial({ color:0x746a5e, roughness:1 }));
-        peak.position.set(x, h/2, z);
-        peak.rotation.y = rng()*Math.PI;
-        scene.add(peak);
-        const c = { x, z, r: baseR*1.08 };
-        mountainColliders.push(c);
-        localPeaks.push(c);
+      if(rng() < 0.3){
+        const x = centerX+(rng()-0.5)*CHUNK_SIZE*0.8, z = centerZ+(rng()-0.5)*CHUNK_SIZE*0.8;
+        if(!inAnyProcZone(x,z)) spawnTree(x,z);
       }
-      const rn = 4+Math.floor(rng()*4);
-      for(let i=0;i<rn;i++){
-        let x,z,tries=0,ok=false;
-        do{
-          x = centerX+(rng()-0.5)*CHUNK_SIZE*0.8;
-          z = centerZ+(rng()-0.5)*CHUNK_SIZE*0.8;
-          ok = localPeaks.every(c=> Math.hypot(x-c.x,z-c.z) > c.r+1.6);
-          tries++;
-        } while(!ok && tries<20);
-        if(ok) spawnRock(x,z);
-      }
-    } else if(biome==='village'){
-      if(region.villageChunk.cx===cx && region.villageChunk.cz===cz && !region.villageBuilt){
-        region.villageBuilt = true;
-        const name = chunkNames[chunkNameIdx % chunkNames.length]; chunkNameIdx++;
-        buildVillage(centerX, centerZ, name);
-        showToast('🏘️ Village découvert : '+name, 1600);
-      } else if(rng() < 0.3){
-        spawnPickup('caillou', centerX+(rng()-0.5)*CHUNK_SIZE*0.7, centerZ+(rng()-0.5)*CHUNK_SIZE*0.7);
-      }
-    } else {
-      const n = 2+Math.floor(rng()*3);
-      for(let i=0;i<n;i++){
-        spawnPickup('caillou', centerX+(rng()-0.5)*CHUNK_SIZE*0.8, centerZ+(rng()-0.5)*CHUNK_SIZE*0.8);
-      }
-      if(rng() < 0.35) spawnTree(centerX+(rng()-0.5)*24, centerZ+(rng()-0.5)*24);
     }
   }
 
@@ -1542,6 +1544,13 @@
         loadChunk(cx+dx, cz+dz);
       }
     }
+    const gx0 = Math.floor(player.position.x/ZCELL), gz0 = Math.floor(player.position.z/ZCELL);
+    for(let dx=-3; dx<=3; dx++){
+      for(let dz=-3; dz<=3; dz++){
+        const zn = getZone(gx0+dx, gz0+dz);
+        if(zn && !zn.built) buildZone(zn);
+      }
+    }
   }
 
   // ============================================================
@@ -1549,11 +1558,11 @@
   // ============================================================
   const animals = [], monsters = [];
 
-  function spawnAnimal(kind){
+  function spawnAnimal(kind, at){
     let built, hp, meatMin, meatMax, speed;
-    let pos;
+    let pos = at || null;
     let tries=0;
-    do{
+    if(!pos) do{
       const a=Math.random()*Math.PI*2, r=20+Math.random()*(WORLD_R-25);
       pos = { x:Math.cos(a)*r, z:Math.sin(a)*r };
       tries++;
@@ -1620,8 +1629,8 @@
   function removeMonster(m){ scene.remove(m.group); const i=monsters.indexOf(m); if(i>=0) monsters.splice(i,1); }
 
   // initial populations
-  for(let i=0;i<6;i++) spawnAnimal('lapin');
-  for(let i=0;i<4;i++) spawnAnimal('sanglier');
+  for(let i=0;i<26;i++) spawnAnimal('lapin');
+  for(let i=0;i<16;i++) spawnAnimal('sanglier');
 
   // ============================================================
   // INTERACTION: gather, combat, pickup, merchant/workshop proximity
@@ -2428,6 +2437,7 @@
 
   function updateAnimals(dt, now){
     for(const a of animals){
+      if(Math.abs(a.group.position.x-player.position.x) > 140 || Math.abs(a.group.position.z-player.position.z) > 140) continue;
       if(a.fleeT > 0){
         a.fleeT -= dt;
         const dx = a.group.position.x-player.position.x, dz = a.group.position.z-player.position.z;
