@@ -127,6 +127,7 @@
 
   <div id="hud">
     <div style="display:flex; flex-direction:column; gap:6px;">
+      <div class="stat" id="playerNameStat">🧑 <b id="playerNameText"></b></div>
       <div class="stat" id="hpWrap">❤️ <div style="flex:1;"><div id="hpBar"><div id="hpFill"></div></div></div></div>
       <div class="stat" id="foodWrap">🍗 <div style="flex:1;"><div id="foodBar"><div id="foodFill"></div></div></div></div>
       <div class="stat">💰 <span id="money">0</span></div>
@@ -194,6 +195,10 @@
       <p><kbd>Z</kbd><kbd>Q</kbd><kbd>S</kbd><kbd>D</kbd> se déplacer — clique pour récolter ou attaquer</p>
       <p>Trouve des villages pour échanger tes ressources et fabriquer des outils. Attention la nuit : des monstres rôdent !</p>
       <p>👥 Configure un serveur multijoueur (bouton 🌐) pour voir tes amis bouger et discuter en direct.</p>
+      <p style="margin-top:10px;"><b>Nom de ton personnage</b></p>
+      <input id="startName" type="text" maxlength="16" placeholder="Ton pseudo" autocomplete="off"
+        style="width:100%; border:none; border-radius:8px; padding:8px 10px; font-size:14px; text-align:center;
+        background:rgba(255,255,255,0.12); color:var(--text);" />
       <div id="startSaveSlots"></div>
       <button class="bigbtn" id="startBtn">Nouvelle partie</button>
     </div>
@@ -261,13 +266,17 @@
     <div class="card">
       <button class="closeBtn" id="tradeCancelBtn">✕</button>
       <h1>🤝 Échange avec <span id="tradePartnerName"></span></h1>
-      <p style="margin-top:10px;"><b>Ton offre</b></p>
+      <p style="margin-top:10px;"><b>Ton offre — argent</b></p>
       <input id="tradeMyAmount" type="number" min="0" step="1" placeholder="0"
         style="width:100%; border:none; border-radius:8px; padding:8px 10px; font-size:14px;
         background:rgba(255,255,255,0.12); color:var(--text);" />
-      <button class="bigbtn" id="tradeProposeBtn" style="margin-top:8px;">Proposer 💰</button>
+      <p style="margin-top:12px;"><b>Ton offre — objets (clique pour ajouter)</b></p>
+      <div id="tradeItemPicker" style="max-height:130px; overflow-y:auto; background:rgba(255,255,255,0.06); border-radius:8px; padding:6px;"></div>
+      <div id="tradeMyOfferList" style="text-align:left; font-size:12px; margin-top:6px;"></div>
+      <button class="bigbtn" id="tradeProposeBtn" style="margin-top:10px;">Proposer mon offre</button>
       <p style="margin-top:14px;"><b>Offre reçue</b></p>
       <div id="tradeTheirAmount" style="font-size:20px; font-weight:800;">0 💰</div>
+      <div id="tradeTheirItems" style="text-align:left; font-size:12px; margin-top:4px;"></div>
       <p id="tradeStatus" style="margin-top:12px; opacity:0.8; font-size:12px;"></p>
       <button class="bigbtn" id="tradeConfirmBtn" style="margin-top:10px;">Confirmer l'échange</button>
     </div>
@@ -2230,8 +2239,17 @@
       } else if(msg.type === 'trade_offer'){
         if(!tradeState || msg.id !== tradeState.partnerId) return;
         tradeState.theirOffer = Math.max(0, Math.floor(Number(msg.amount)||0));
+        const cleanItems = {};
+        if(msg.items && typeof msg.items === 'object'){
+          for(const k in msg.items){
+            const q = Math.floor(Number(msg.items[k])||0);
+            if(RES_DEFS[k] && q>0 && q<=9999) cleanItems[k] = q;
+          }
+        }
+        tradeState.theirItems = cleanItems;
         tradeState.theirConfirmed = false; tradeState.myConfirmed = false;
         $('tradeTheirAmount').textContent = tradeState.theirOffer+' 💰';
+        renderTradeTheirItems();
         $('tradeStatus').textContent = 'L\'offre a changé, confirme à nouveau.';
       } else if(msg.type === 'trade_confirm'){
         if(!tradeState || msg.id !== tradeState.partnerId) return;
@@ -2287,12 +2305,73 @@
     $('tradeRequestOverlay').style.display = 'none';
   });
   function openTradeWindow(partnerId, partnerName){
-    tradeState = { partnerId, partnerName, myOffer:0, theirOffer:0, myConfirmed:false, theirConfirmed:false };
+    tradeState = { partnerId, partnerName, myOffer:0, theirOffer:0, myItems:{}, theirItems:{}, myConfirmed:false, theirConfirmed:false };
     $('tradePartnerName').textContent = partnerName;
     $('tradeMyAmount').value = '';
     $('tradeTheirAmount').textContent = '0 💰';
+    $('tradeTheirItems').innerHTML = '';
     $('tradeStatus').textContent = '';
+    renderTradeItemPicker();
+    renderTradeMyOffer();
     $('tradeOverlay').style.display = 'flex';
+  }
+  function renderTradeItemPicker(){
+    const wrap = $('tradeItemPicker');
+    if(!tradeState){ wrap.innerHTML=''; return; }
+    wrap.innerHTML = '';
+    Object.keys(RES_DEFS).forEach(k=>{
+      const have = inv[k]||0;
+      const already = tradeState.myItems[k]||0;
+      if(have<=0) return;
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:3px 0; font-size:12px;';
+      row.innerHTML = `<span>${RES_DEFS[k].icon} ${RES_DEFS[k].name} (dispo ${have-already})</span>`;
+      const btn = document.createElement('button');
+      btn.textContent = '+';
+      btn.disabled = (have-already) <= 0;
+      btn.style.cssText = 'background:var(--accent); border:none; color:#08220f; font-weight:800; border-radius:6px; padding:2px 10px; cursor:pointer;';
+      btn.addEventListener('click', ()=>{
+        tradeState.myItems[k] = (tradeState.myItems[k]||0)+1;
+        renderTradeItemPicker(); renderTradeMyOffer();
+      });
+      row.appendChild(btn);
+      wrap.appendChild(row);
+    });
+    if(!wrap.children.length) wrap.innerHTML = '<div style="opacity:0.6; font-size:12px;">Aucun objet dans ton sac.</div>';
+  }
+  function renderTradeMyOffer(){
+    const wrap = $('tradeMyOfferList');
+    wrap.innerHTML = '';
+    if(!tradeState) return;
+    Object.keys(tradeState.myItems).forEach(k=>{
+      const qty = tradeState.myItems[k];
+      if(qty<=0) return;
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; padding:2px 0;';
+      row.innerHTML = `<span>${RES_DEFS[k].icon} x${qty}</span>`;
+      const btn = document.createElement('button');
+      btn.textContent = '−';
+      btn.style.cssText = 'background:rgba(255,255,255,0.15); border:none; color:var(--text); border-radius:6px; padding:1px 10px; cursor:pointer;';
+      btn.addEventListener('click', ()=>{
+        tradeState.myItems[k]--;
+        if(tradeState.myItems[k]<=0) delete tradeState.myItems[k];
+        renderTradeItemPicker(); renderTradeMyOffer();
+      });
+      row.appendChild(btn);
+      wrap.appendChild(row);
+    });
+  }
+  function renderTradeTheirItems(){
+    const wrap = $('tradeTheirItems');
+    wrap.innerHTML = '';
+    if(!tradeState) return;
+    Object.keys(tradeState.theirItems).forEach(k=>{
+      const qty = tradeState.theirItems[k];
+      if(qty<=0 || !RES_DEFS[k]) return;
+      const row = document.createElement('div');
+      row.textContent = RES_DEFS[k].icon+' x'+qty;
+      wrap.appendChild(row);
+    });
   }
   function closeTradeWindow(toastMsg){
     tradeState = null;
@@ -2303,14 +2382,20 @@
     if(!tradeState) return;
     let amount = Math.max(0, Math.floor(Number($('tradeMyAmount').value)||0));
     if(amount > money){ showToast('Tu n\'as pas assez de 💰', 1200); return; }
+    for(const k in tradeState.myItems){
+      if(tradeState.myItems[k] > (inv[k]||0)){ showToast('Pas assez de '+RES_DEFS[k].name, 1200); return; }
+    }
     tradeState.myOffer = amount;
     tradeState.myConfirmed = false; tradeState.theirConfirmed = false;
-    ws.send(JSON.stringify({ type:'trade_offer', to:tradeState.partnerId, amount }));
-    $('tradeStatus').textContent = 'Offre envoyée : '+amount+' 💰';
+    ws.send(JSON.stringify({ type:'trade_offer', to:tradeState.partnerId, amount, items: tradeState.myItems }));
+    $('tradeStatus').textContent = 'Offre envoyée : '+amount+' 💰'+(Object.keys(tradeState.myItems).length? ' + objets':'');
   });
   $('tradeConfirmBtn').addEventListener('click', ()=>{
     if(!tradeState) return;
     if(tradeState.myOffer > money){ showToast('Tu n\'as pas assez de 💰', 1200); return; }
+    for(const k in tradeState.myItems){
+      if(tradeState.myItems[k] > (inv[k]||0)){ showToast('Pas assez de '+RES_DEFS[k].name, 1200); return; }
+    }
     tradeState.myConfirmed = true;
     ws.send(JSON.stringify({ type:'trade_confirm', to:tradeState.partnerId }));
     $('tradeStatus').textContent = 'En attente de la confirmation de '+tradeState.partnerName+'…';
@@ -2323,10 +2408,15 @@
   function maybeFinishTrade(){
     if(!tradeState || !tradeState.myConfirmed || !tradeState.theirConfirmed) return;
     if(tradeState.myOffer > money){ closeTradeWindow('Échange annulé : fonds insuffisants.'); return; }
+    for(const k in tradeState.myItems){
+      if(tradeState.myItems[k] > (inv[k]||0)){ closeTradeWindow('Échange annulé : objets insuffisants.'); return; }
+    }
     money = money - tradeState.myOffer + tradeState.theirOffer;
+    for(const k in tradeState.myItems){ inv[k] -= tradeState.myItems[k]; }
+    for(const k in tradeState.theirItems){ addRes(k, tradeState.theirItems[k]); }
     updateHUD();
     sndCraft();
-    closeTradeWindow('Échange conclu : -'+tradeState.myOffer+'💰 / +'+tradeState.theirOffer+'💰');
+    closeTradeWindow('Échange conclu : -'+tradeState.myOffer+'💰 / +'+tradeState.theirOffer+'💰 et objets échangés');
   }
 
   let lastPresenceSend = 0;
@@ -2348,8 +2438,7 @@
   $('mpConnectBtn').addEventListener('click', ()=>{
     const url = $('mpServerUrl').value.trim();
     if(!url){ showToast('Indique l\'adresse du serveur', 1200); return; }
-    myName = ($('mpName').value.trim() || myName).slice(0,16);
-    localStorage.setItem('terres_sauvages_name', myName);
+    applyPlayerName($('mpName').value);
     localStorage.setItem('terres_sauvages_ws_url', url);
     roomCode = ($('mpRoomCode').value.trim() || roomCode).slice(0,24);
     location.hash = roomCode;
@@ -2441,6 +2530,7 @@
   }
 
   function loadFromSlot(i){
+    applyPlayerName($('startName').value);
     const data = getSlotData(i);
     if(!data) return;
     hp = data.hp; maxHp = data.maxHp; money = data.money;
@@ -2541,7 +2631,18 @@
   initRoom();
   let gameState = 'menu';
 
+  function applyPlayerName(n){
+    n = (n||'').trim().slice(0,16);
+    if(n) myName = n;
+    localStorage.setItem('terres_sauvages_name', myName);
+    $('playerNameText').textContent = myName;
+    $('mpName').value = myName;
+  }
+  $('startName').value = myName;
+  $('playerNameText').textContent = myName;
+  $('startName').addEventListener('keydown', e=> e.stopPropagation());
   function startGame(){
+    applyPlayerName($('startName').value);
     hp = 100; maxHp = 100; money = 0; food = 100; maxFood = 100;
     Object.keys(inv).forEach(k=> inv[k]=0);
     Object.keys(toolBoost).forEach(k=> toolBoost[k]=0);
