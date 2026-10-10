@@ -168,6 +168,7 @@
       <div class="toolBtn" id="toolPioche" title="Pioche" style="display:none;">⛏️</div>
       <div class="toolBtn" id="toolEpee" title="Épée" style="display:none;">🗡️</div>
       <div class="toolBtn" id="toolHoue" title="Houe (planter)" style="display:none;">🌱</div>
+      <div class="toolBtn" id="itemMur" title="Poser un mur" style="display:none;">🧱<span class="itemCount" id="cntMur">0</span></div>
       <div class="toolBtn" id="itemBandage" title="Bandage" style="display:none;">🩹<span class="itemCount" id="cntBandage">0</span></div>
       <div class="toolBtn" id="itemPomme" title="Pomme" style="display:none;">🍎<span class="itemCount" id="cntPomme">0</span></div>
       <div class="toolBtn" id="itemBanane" title="Banane" style="display:none;">🍌<span class="itemCount" id="cntBanane">0</span></div>
@@ -578,6 +579,7 @@
   const WORLD_R = 135;
   const FOREST_ZONES = [ {x:-55,z:-35,r:26}, {x:60,z:45,r:24}, {x:-25,z:70,r:20} ];
   const MOUNTAIN_ZONES = [ {x:68,z:-55,r:24}, {x:-78,z:22,r:22} ];
+  const builtVillages = [];
   const VILLAGES = [ {x:0,z:0,name:'Rivebois'}, {x:-58,z:62,name:'Pierreval'} ];
 
   const ground = new THREE.Mesh(
@@ -661,6 +663,7 @@
   }
 
   function buildVillage(x, z, name){
+    builtVillages.push({ x, z });
     biomePatch(x, z, 16, 0x9c7f4f);
     for(let i=0;i<4;i++){
       const a = (i/4)*Math.PI*2 + 0.4;
@@ -887,7 +890,8 @@
     pomme:{icon:'🍎', name:'Pomme', sell:2}, banane:{icon:'🍌', name:'Banane', sell:2}, poire:{icon:'🍐', name:'Poire', sell:2},
     carotte:{icon:'🥕', name:'Carotte', sell:2}, tomate:{icon:'🍅', name:'Tomate', sell:2},
     viande:{icon:'🥩', name:'Viande', sell:4},
-    bandage:{icon:'🩹', name:'Bandage', sell:0}
+    bandage:{icon:'🩹', name:'Bandage', sell:0},
+    mur:{icon:'🧱', name:'Mur', sell:0}
   };
   const inv = {}; Object.keys(RES_DEFS).forEach(k=>inv[k]=0);
   let money = 0;
@@ -935,6 +939,8 @@
       if(inv[key]>0){ btn.style.display='flex'; $(c.cnt).textContent = inv[key]; }
       else btn.style.display = 'none';
     });
+    if(inv.mur>0){ $('itemMur').style.display='flex'; $('cntMur').textContent = inv.mur; }
+    else $('itemMur').style.display = 'none';
   }
   function renderBag(){
     const grid = $('invGrid');
@@ -1142,6 +1148,7 @@
     { key:'pioche', name:'⛏️ Pioche', cost:{bois:3,pierre:2}, desc:'Casse la pierre plus vite' },
     { key:'epee', name:'🗡️ Épée', cost:{bois:2,fer:3}, desc:'Combat plus efficace' },
     { key:'houe', name:'🌱 Houe', cost:{bois:3,pierre:1}, desc:'Plante carottes et pommes, récolte x4 après 1 min' },
+    { key:'mur', name:'🧱 Mur', cost:{bois:30}, desc:'Mur solide (4 largeurs de personnage de long, 1 de haut). Pose-le où tu veux, sauf dans les villages', repeatable:true },
     { key:'bandage', name:'🩹 Bandage', cost:{feuille:4,branche:1}, desc:'Soigne 20% de ta vie', repeatable:true },
   ];
   function renderWorkshop(){
@@ -1922,6 +1929,10 @@
       if(dot < FOV_COS) continue;
       if(dist < bestDist){ bestDist = dist; best = c; }
     }
+    if(toolName==='hache'){
+      const wl = findWallInReach(FOV_COS, fx, fz);
+      if(wl && (!best || wl.dist < bestDist)){ hitWall(wl); updateHUD(); return; }
+    }
     if(!best) return;
 
     const tpos = nodeWorldPos(best);
@@ -2163,6 +2174,153 @@
   }, {passive:true});
   renderer.domElement.addEventListener('touchend', dragEnd, {passive:true});
 
+  // ============================================================
+  // MURS + COLLISIONS DES CRÉATURES
+  // Mur : longueur = 4 largeurs de personnage (0.7), hauteur = taille du personnage (1.65)
+  // ============================================================
+  const WALL_HW = 1.4, WALL_HD = 0.175, WALL_H = 1.65;
+  const playerWalls = [];
+  const wallMat = new THREE.MeshStandardMaterial({ color:0x8a6a45, roughness:0.9 });
+  const wallCapMat = new THREE.MeshStandardMaterial({ color:0x6b4f30, roughness:0.9 });
+  function placeWall(x, z, ang){
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(WALL_HW*2, WALL_H, WALL_HD*2), wallMat);
+    body.position.y = WALL_H/2; g.add(body);
+    for(let i=1;i<4;i++){
+      const line = new THREE.Mesh(new THREE.BoxGeometry(WALL_HW*2+0.02, 0.05, WALL_HD*2+0.02), wallCapMat);
+      line.position.y = WALL_H*i/4; g.add(line);
+    }
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(WALL_HW*2+0.06, 0.08, WALL_HD*2+0.06), wallCapMat);
+    cap.position.y = WALL_H+0.04; g.add(cap);
+    g.position.set(x,0,z); g.rotation.y = ang;
+    scene.add(g);
+    const w = { x, z, ang, c:Math.cos(ang), s:Math.sin(ang), group:g };
+    playerWalls.push(w);
+    return w;
+  }
+  function clearWalls(){
+    playerWalls.forEach(w=> scene.remove(w.group));
+    playerWalls.length = 0;
+  }
+  function inVillageArea(x,z){
+    return builtVillages.some(v=> Math.hypot(x-v.x, z-v.z) < 20);
+  }
+  $('itemMur').addEventListener('click', ()=>{
+    if((inv.mur||0) <= 0) return;
+    const wx = player.position.x + Math.sin(facingAngle)*2.1;
+    const wz = player.position.z + Math.cos(facingAngle)*2.1;
+    if(inVillageArea(wx,wz) || inVillageArea(player.position.x, player.position.z)){
+      showToast('Impossible de construire dans un village', 1500); return;
+    }
+    inv.mur--;
+    placeWall(wx, wz, facingAngle);
+    sndCraft();
+    updateHUD();
+  });
+  // la hache peut détruire un mur et le récupérer
+  function findWallInReach(FOV_COS, fx, fz){
+    let found = null;
+    for(const w of playerWalls){
+      const dx = player.position.x-w.x, dz = player.position.z-w.z;
+      const lx = dx*w.c - dz*w.s, lz = dx*w.s + dz*w.c;
+      const cx = Math.max(-WALL_HW, Math.min(WALL_HW, lx));
+      const cz = Math.max(-WALL_HD, Math.min(WALL_HD, lz));
+      // point le plus proche du mur, en coordonnées du monde
+      const qx = w.x + cx*w.c + cz*w.s, qz = w.z - cx*w.s + cz*w.c;
+      const ex = qx-player.position.x, ez = qz-player.position.z;
+      const dist = Math.hypot(ex,ez);
+      if(dist > ATTACK_RANGE) continue;
+      if(dist > 0.05 && (ex/dist)*fx + (ez/dist)*fz < FOV_COS) continue;
+      if(!found || dist < found.dist) found = { w, dist, qx, qz };
+    }
+    return found;
+  }
+  function hitWall(wl){
+    const w = wl.w;
+    facingAngle = Math.atan2(wl.qx-player.position.x, wl.qz-player.position.z);
+    player.rotation.y = facingAngle;
+    if(w.hp == null) w.hp = 1;
+    const hits = HITS_TO_BREAK.hache[toolTier.hache||'base'];
+    w.hp -= 1/hits;
+    sndChop();
+    if(w.hp <= 0){
+      scene.remove(w.group);
+      const i = playerWalls.indexOf(w);
+      if(i>=0) playerWalls.splice(i,1);
+      addRes('mur', 1);
+      sndPickup();
+      floatText(new THREE.Vector3(w.x,1.6,w.z), '+1 🧱', '#ffd166');
+    } else {
+      w.group.scale.set(1,1,1.0);
+      w.group.position.y = 0.04;
+      setTimeout(()=>{ w.group.position.y = 0; }, 70);
+    }
+  }
+  // pousse un point (rayon R) hors d'un cercle plein
+  function pushCircle(p, ox, oz, orad, R){
+    const dx = p.x-ox, dz = p.z-oz;
+    const m = orad+R;
+    if(dx>m || dx<-m || dz>m || dz<-m) return;
+    const dist = Math.hypot(dx,dz);
+    if(dist < m){
+      if(dist < 0.0001){ p.x += m; return; }
+      const k = (m-dist)/dist;
+      p.x += dx*k; p.z += dz*k;
+    }
+  }
+  // pousse un point (rayon R) hors d'un mur (boîte orientée)
+  function pushWall(p, w, R){
+    const dx = p.x-w.x, dz = p.z-w.z;
+    if(dx>WALL_HW+R+0.5 || dx<-(WALL_HW+R+0.5) || dz>WALL_HW+R+0.5 || dz<-(WALL_HW+R+0.5)) return;
+    const lx = dx*w.c - dz*w.s, lz = dx*w.s + dz*w.c;
+    const cx = Math.max(-WALL_HW, Math.min(WALL_HW, lx));
+    const cz = Math.max(-WALL_HD, Math.min(WALL_HD, lz));
+    let ex = lx-cx, ez = lz-cz;
+    let d = Math.hypot(ex,ez);
+    let px, pz;
+    if(d > 0.0001){
+      if(d >= R) return;
+      px = ex/d*(R-d); pz = ez/d*(R-d);
+    } else {
+      const penX = WALL_HW-Math.abs(lx), penZ = WALL_HD-Math.abs(lz);
+      if(penZ < penX){ px = 0; pz = (lz>=0?1:-1)*(penZ+R); }
+      else { px = (lx>=0?1:-1)*(penX+R); pz = 0; }
+    }
+    p.x += px*w.c + pz*w.s;
+    p.z += -px*w.s + pz*w.c;
+  }
+  // les créatures se cognent aux objets solides (montagnes, huttes, arbres, rochers, murs)
+  function pushOutOfSolids(p, R){
+    for(const c of mountainColliders) pushCircle(p,c.x,c.z,c.r,R);
+    for(const c of hutColliders) pushCircle(p,c.x,c.z,c.r,R);
+    for(const t of trees) if(t.alive) pushCircle(p,t.x,t.z,0.45,R);
+    for(const r of rocks) if(r.alive) pushCircle(p,r.x,r.z,0.5,R);
+    for(const w of playerWalls) pushWall(p,w,R);
+  }
+  // un mur bloque-t-il la ligne entre deux points ?
+  function wallBlocks(ax,az,bx,bz){
+    for(const w of playerWalls){
+      if(Math.hypot(ax-w.x,az-w.z) > 12 && Math.hypot(bx-w.x,bz-w.z) > 12) continue;
+      const a0x = ax-w.x, a0z = az-w.z, b0x = bx-w.x, b0z = bz-w.z;
+      const alx = a0x*w.c - a0z*w.s, alz = a0x*w.s + a0z*w.c;
+      const blx = b0x*w.c - b0z*w.s, blz = b0x*w.s + b0z*w.c;
+      let t0 = 0, t1 = 1;
+      const dxl = blx-alx, dzl = blz-alz;
+      let ok = true;
+      for(const [p0,dp,mn,mx] of [[alx,dxl,-WALL_HW,WALL_HW],[alz,dzl,-WALL_HD,WALL_HD]]){
+        if(Math.abs(dp) < 1e-9){ if(p0<mn || p0>mx){ ok=false; break; } }
+        else {
+          let ta = (mn-p0)/dp, tb = (mx-p0)/dp;
+          if(ta>tb){ const tmp=ta; ta=tb; tb=tmp; }
+          t0 = Math.max(t0,ta); t1 = Math.min(t1,tb);
+          if(t0>t1){ ok=false; break; }
+        }
+      }
+      if(ok) return true;
+    }
+    return false;
+  }
+
   const PLAYER_R = 0.45;
   function pushAway(ox,oz,orad){
     const dx = player.position.x-ox, dz = player.position.z-oz;
@@ -2180,6 +2338,7 @@
     for(const c of hutColliders) pushAway(c.x,c.z,c.r);
     for(const t of trees) if(t.alive) pushAway(t.x,t.z,0.45);
     for(const r of rocks) if(r.alive) pushAway(r.x,r.z,0.5);
+    for(const w of playerWalls) pushWall(player.position, w, PLAYER_R);
     for(const a of animals) if(a.alive) pushAway(a.group.position.x,a.group.position.z,0.4);
     for(const m of monsters) if(m.alive) pushAway(m.group.position.x,m.group.position.z,0.4);
     for(const n of npcs) pushAway(n.group.position.x,n.group.position.z,0.4);
@@ -2649,6 +2808,7 @@
       ts: Date.now(), hp, maxHp, money, food, maxFood,
       toolBoost: {...toolBoost}, forceBoost, boostLevels: {...boostLevels}, SPEED,
       inv: {...inv}, owned: {...owned}, equippedTool, toolTier: {...toolTier},
+      walls: playerWalls.map(w=>({x:w.x,z:w.z,ang:w.ang})),
       plots: plots.map(q=>({type:q.type,x:q.x,z:q.z,plantedAt:q.plantedAt,stage:q.stage})),
       px: player.position.x, pz: player.position.z, worldTime
     };
@@ -2698,6 +2858,8 @@
     wasDay = (worldTime % CYCLE_LEN) < DAY_LEN;
     equipTool(data.equippedTool && data.equippedTool!=='houe' && (data.equippedTool==='bare'||owned[data.equippedTool]) ? data.equippedTool : 'bare');
     clearPlots();
+    clearWalls();
+    (data.walls||[]).forEach(w=> placeWall(w.x, w.z, w.ang));
     (data.plots||[]).forEach(q=> plantSeed(q.type, q.x, q.z, q.plantedAt, q.stage));
     gameState = 'playing';
     $('startOverlay').style.display = 'none';
@@ -2799,6 +2961,7 @@
     facingAngle = 0; player.rotation.y = 0; camAngle = 0; camPolar = 0.747;
     equipTool('bare');
     clearPlots();
+    clearWalls();
     rollQuests();
     gameState = 'playing';
     $('startOverlay').style.display = 'none';
@@ -2839,6 +3002,7 @@
         a.group.position.x += (dx/dist)*sp*dt;
         a.group.position.z += (dz/dist)*sp*dt;
         a.group.rotation.y = Math.atan2(dx,dz);
+        pushOutOfSolids(a.group.position, 0.4);
       }
       a.walkPhase += dt*5;
       const sw = Math.sin(a.walkPhase)*0.4;
@@ -2850,7 +3014,7 @@
     for(const m of monsters){
       const dx = player.position.x-m.group.position.x, dz = player.position.z-m.group.position.z;
       const dist = Math.hypot(dx,dz);
-      if(dist < 2.2){
+      if(dist < 2.2 && !wallBlocks(m.group.position.x,m.group.position.z,player.position.x,player.position.z)){
         m.attackTimer += dt;
         if(m.attackTimer >= 1){
           m.attackTimer = 0;
@@ -2863,6 +3027,7 @@
         const nx = dx/dist, nz = dz/dist;
         m.group.position.x += nx*m.speed*dt;
         m.group.position.z += nz*m.speed*dt;
+        pushOutOfSolids(m.group.position, 0.4);
         m.group.rotation.y = Math.atan2(nx,nz);
         m.walkPhase += dt*6;
         if(m.built.legs){
