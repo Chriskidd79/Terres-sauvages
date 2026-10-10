@@ -167,6 +167,7 @@
       <div class="toolBtn" id="toolHache" title="Hache" style="display:none;">🪓</div>
       <div class="toolBtn" id="toolPioche" title="Pioche" style="display:none;">⛏️</div>
       <div class="toolBtn" id="toolEpee" title="Épée" style="display:none;">🗡️</div>
+      <div class="toolBtn" id="toolHoue" title="Houe (planter)" style="display:none;">🌱</div>
       <div class="toolBtn" id="itemBandage" title="Bandage" style="display:none;">🩹<span class="itemCount" id="cntBandage">0</span></div>
       <div class="toolBtn" id="itemPomme" title="Pomme" style="display:none;">🍎<span class="itemCount" id="cntPomme">0</span></div>
       <div class="toolBtn" id="itemBanane" title="Banane" style="display:none;">🍌<span class="itemCount" id="cntBanane">0</span></div>
@@ -279,6 +280,15 @@
       <div id="tradeTheirItems" style="text-align:left; font-size:12px; margin-top:4px;"></div>
       <p id="tradeStatus" style="margin-top:12px; opacity:0.8; font-size:12px;"></p>
       <button class="bigbtn" id="tradeConfirmBtn" style="margin-top:10px;">Confirmer l'échange</button>
+    </div>
+  </div>
+
+  <div class="overlay" id="plantOverlay" style="display:none;">
+    <div class="card">
+      <button class="closeBtn" id="closePlant">✕</button>
+      <h1>🌱 Que planter ?</h1>
+      <p>Chaque plante donne 4 récoltes. Pousse : 1 min (carotte, pomme) ou 2 min (tomate, banane, poire).</p>
+      <div id="plantChoices"></div>
     </div>
   </div>
 
@@ -1073,7 +1083,7 @@
   $('closeQuest').addEventListener('click', ()=>{ $('questOverlay').style.display='none'; });
 
   // ---- workshop / crafting ----
-  const owned = { hache:false, pioche:false, epee:false };
+  const owned = { hache:false, pioche:false, epee:false, houe:false };
 
   // ---- trainer: permanent boosts, price rises each purchase ----
   const toolBoost = { hache:0, pioche:0, epee:0 };
@@ -1131,6 +1141,7 @@
     { key:'hache', name:'🪓 Hache', cost:{bois:3,pierre:2}, desc:'Coupe le bois plus vite' },
     { key:'pioche', name:'⛏️ Pioche', cost:{bois:3,pierre:2}, desc:'Casse la pierre plus vite' },
     { key:'epee', name:'🗡️ Épée', cost:{bois:2,fer:3}, desc:'Combat plus efficace' },
+    { key:'houe', name:'🌱 Houe', cost:{bois:3,pierre:1}, desc:'Plante carottes et pommes, récolte x4 après 1 min' },
     { key:'bandage', name:'🩹 Bandage', cost:{feuille:4,branche:1}, desc:'Soigne 20% de ta vie', repeatable:true },
   ];
   function renderWorkshop(){
@@ -1160,7 +1171,7 @@
           } else {
             owned[r.key] = true;
             $('tool'+r.key.charAt(0).toUpperCase()+r.key.slice(1)).style.display='flex';
-            equipTool(r.key);
+            if(r.key!=='houe') equipTool(r.key);
             showToast(r.name+' fabriqué !', 1200);
           }
           renderWorkshop();
@@ -1267,6 +1278,139 @@
 
   $('bagBtn').addEventListener('click', ()=>{ renderBag(); $('bagOverlay').style.display='flex'; });
   $('closeBag').addEventListener('click', ()=>{ $('bagOverlay').style.display='none'; });
+
+  // ============================================================
+  // HOUE : planter carottes / pommes, pousse en 1 min, récolte x4
+  // ============================================================
+  const PLANT_DEFS = {
+    carotte: { kind:'veg',  ms:60000 },
+    pomme:   { kind:'tree', ms:60000 },
+    tomate:  { kind:'veg',  ms:120000 },
+    banane:  { kind:'tree', ms:120000 },
+    poire:   { kind:'tree', ms:120000 }
+  };
+  const plots = [];
+  function makeVegPlot(type){
+    const g = new THREE.Group();
+    const soil = new THREE.Mesh(new THREE.CircleGeometry(0.7,10),
+      new THREE.MeshStandardMaterial({ color:0x4a3222, roughness:1 }));
+    soil.rotation.x = -Math.PI/2; soil.position.y = 0.03; g.add(soil);
+    const tops = [];
+    for(let i=0;i<4;i++){
+      const a = (i/4)*Math.PI*2 + 0.4;
+      const cx = Math.cos(a)*0.34, cz = Math.sin(a)*0.34;
+      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.1,0.45,5),
+        new THREE.MeshStandardMaterial({ color:0x3f8f3a }));
+      leaf.position.set(cx, 0.25, cz); g.add(leaf);
+      let crop;
+      if(type==='tomate'){
+        crop = new THREE.Mesh(new THREE.SphereGeometry(0.12,8,8),
+          new THREE.MeshStandardMaterial({ color:0xd94040 }));
+        crop.position.set(cx, 0.2, cz);
+      } else {
+        crop = new THREE.Mesh(new THREE.ConeGeometry(0.09,0.28,6),
+          new THREE.MeshStandardMaterial({ color:0xe8823f }));
+        crop.rotation.x = Math.PI; crop.position.set(cx, 0.12, cz);
+      }
+      crop.visible = false; g.add(crop); tops.push(crop);
+    }
+    return { g, tops };
+  }
+  function plantSeed(type, x, z, plantedAt, stage){
+    const def = PLANT_DEFS[type];
+    if(!def) return null;
+    const q = { type, def, x, z, plantedAt: plantedAt||Date.now(), stage: stage||'growing' };
+    if(def.kind==='veg'){
+      const b = makeVegPlot(type); q.group = b.g; q.tops = b.tops;
+    } else {
+      const b = makeTreeMesh(true, type); q.group = b.g; q.built = b;
+      b.fruitMeshes.forEach(f=> f.visible = false);
+    }
+    q.group.position.set(x,0,z);
+    scene.add(q.group);
+    q.sprite = makeEmojiSprite(RES_DEFS[type].icon, 0.9);
+    q.sprite.position.y = def.kind==='veg' ? 1.1 : 3.6;
+    q.sprite.visible = false; q.group.add(q.sprite);
+    plots.push(q);
+    if(q.stage==='tree') turnPlotIntoTree(q, true);
+    return q;
+  }
+  function turnPlotIntoTree(q, fruitReadyNow){
+    q.stage = 'tree';
+    q.group.scale.setScalar(1);
+    q.sprite.visible = false;
+    const b = q.built;
+    const tree = {
+      kind:'tree', group:q.group, hitMesh:b.trunk, hp:42, maxHp:42, x:q.x, z:q.z, alive:true, respawnAt:0,
+      isFruit:true, fruitType:q.type, fruitReady:!!fruitReadyNow,
+      fruitTimer: performance.now()+45000, fruitMeshes:b.fruitMeshes
+    };
+    b.fruitMeshes.forEach(f=> f.visible = !!fruitReadyNow);
+    b.trunk.userData.targetRef = tree; b.canopy.userData.targetRef = tree;
+    trees.push(tree);
+  }
+  function clearPlots(){
+    plots.forEach(q=>{
+      scene.remove(q.group);
+      if(q.stage==='tree'){ const i = trees.findIndex(t=>t.group===q.group); if(i>=0) trees.splice(i,1); }
+    });
+    plots.length = 0;
+  }
+  function updatePlots(){
+    const nowMs = Date.now();
+    for(let i=plots.length-1;i>=0;i--){
+      const q = plots[i];
+      if(q.stage==='tree') continue;
+      const prog = Math.min(1, (nowMs-q.plantedAt)/q.def.ms);
+      q.group.scale.setScalar(0.25 + 0.75*prog);
+      if(prog >= 1){
+        if(q.def.kind==='veg') q.tops.forEach(c=>c.visible = true);
+        else q.built.fruitMeshes.forEach(f=>f.visible = true);
+        q.sprite.visible = true;
+        if(Math.hypot(player.position.x-q.x, player.position.z-q.z) < 1.8){
+          addRes(q.type, 4);
+          sndPickup();
+          floatText(new THREE.Vector3(q.x,1.4,q.z), '+4 '+RES_DEFS[q.type].icon, '#ffd166');
+          bumpQuest('fruit', 4);
+          if(q.def.kind==='veg'){
+            scene.remove(q.group); plots.splice(i,1);
+          } else {
+            turnPlotIntoTree(q, false);
+          }
+        }
+      }
+    }
+  }
+  function plantAtFront(type){
+    const px = player.position.x + Math.sin(facingAngle)*1.4;
+    const pz = player.position.z + Math.cos(facingAngle)*1.4;
+    if(plots.some(q=> Math.hypot(q.x-px,q.z-pz) < 1.6)){ showToast('Trop près d\'une autre plantation', 1200); return; }
+    if((inv[type]||0) <= 0) return;
+    inv[type]--;
+    plantSeed(type, px, pz);
+    sndCraft();
+    showToast('🌱 Planté ! Prêt dans '+(PLANT_DEFS[type].ms/60000)+' min', 1400);
+    updateHUD();
+  }
+  $('toolHoue').addEventListener('click', ()=>{
+    if(!owned.houe) return;
+    const avail = Object.keys(PLANT_DEFS).filter(k=> (inv[k]||0) > 0);
+    if(avail.length===0){ showToast('Il te faut un fruit ou un légume à planter', 1600); return; }
+    if(avail.length===1){ plantAtFront(avail[0]); return; }
+    const wrap = $('plantChoices');
+    wrap.innerHTML = '';
+    avail.forEach(k=>{
+      const btn = document.createElement('button');
+      btn.className = 'bigbtn';
+      btn.style.marginTop = '8px';
+      const mins = PLANT_DEFS[k].ms/60000;
+      btn.textContent = RES_DEFS[k].icon+' '+RES_DEFS[k].name+' ('+inv[k]+') — '+mins+' min'+(PLANT_DEFS[k].kind==='tree'?' · arbre':'');
+      btn.addEventListener('click', ()=>{ $('plantOverlay').style.display='none'; plantAtFront(k); });
+      wrap.appendChild(btn);
+    });
+    $('plantOverlay').style.display = 'flex';
+  });
+  $('closePlant').addEventListener('click', ()=>{ $('plantOverlay').style.display='none'; });
 
   ['toolBare','toolHache','toolPioche','toolEpee'].forEach(id=>{
     $(id).addEventListener('click', ()=>{
@@ -2505,6 +2649,7 @@
       ts: Date.now(), hp, maxHp, money, food, maxFood,
       toolBoost: {...toolBoost}, forceBoost, boostLevels: {...boostLevels}, SPEED,
       inv: {...inv}, owned: {...owned}, equippedTool, toolTier: {...toolTier},
+      plots: plots.map(q=>({type:q.type,x:q.x,z:q.z,plantedAt:q.plantedAt,stage:q.stage})),
       px: player.position.x, pz: player.position.z, worldTime
     };
     saveCache['slot'+i] = data;
@@ -2544,14 +2689,16 @@
     Object.keys(owned).forEach(k=>{
       owned[k] = !!(data.owned && data.owned[k]);
       if(owned[k]){
-        const map = { hache:'toolHache', pioche:'toolPioche', epee:'toolEpee' };
+        const map = { hache:'toolHache', pioche:'toolPioche', epee:'toolEpee', houe:'toolHoue' };
         $(map[k]).style.display = 'flex';
       }
     });
     player.position.set(data.px||0, 0, data.pz||9);
     worldTime = data.worldTime||0;
     wasDay = (worldTime % CYCLE_LEN) < DAY_LEN;
-    equipTool(data.equippedTool && (data.equippedTool==='bare'||owned[data.equippedTool]) ? data.equippedTool : 'bare');
+    equipTool(data.equippedTool && data.equippedTool!=='houe' && (data.equippedTool==='bare'||owned[data.equippedTool]) ? data.equippedTool : 'bare');
+    clearPlots();
+    (data.plots||[]).forEach(q=> plantSeed(q.type, q.x, q.z, q.plantedAt, q.stage));
     gameState = 'playing';
     $('startOverlay').style.display = 'none';
     $('deathOverlay').style.display = 'none';
@@ -2651,6 +2798,7 @@
     player.position.set(0,0,9);
     facingAngle = 0; player.rotation.y = 0; camAngle = 0; camPolar = 0.747;
     equipTool('bare');
+    clearPlots();
     rollQuests();
     gameState = 'playing';
     $('startOverlay').style.display = 'none';
@@ -2780,6 +2928,7 @@
       updateAnimals(dt, now);
       updateMonsters(dt, now);
       updateNodesAndPickups(now);
+      updatePlots();
       updateInteractBtn();
       updateTradeBtn();
       updateStarvation(dt);
